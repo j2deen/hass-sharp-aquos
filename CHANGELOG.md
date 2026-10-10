@@ -4,6 +4,31 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
 follow the integration's `manifest.json` version.
 
+## [0.1.6] - 2026-10-10
+
+### Changed
+- Per-field support is now learned at runtime instead of assumed. A field
+  the TV actively rejects (`AquosCommandError`) is marked unsupported and
+  skipped on every later poll, so a model that doesn't do e.g. backlight
+  no longer costs a wasted TCP round trip per cycle. Connection errors
+  stay transient and never mark a field unsupported.
+- Diagnostic sensors (aspect ratio, AV mode, backlight, signal strength)
+  are only created once the TV has returned a value for that field. A
+  rejected query never gets an entity, instead of a permanently-unknown
+  sensor. Since support is learned while the TV is on, sensors can appear
+  a poll or two after setup rather than immediately.
+- Channel and signal strength are only queried while the TV is on the
+  tuner input. On HDMI the TV rejects them, which must not be mistaken
+  for the model lacking the commands.
+- Poll interval raised from 15s to 60s. A full update is several sequential
+  TCP connections, and commands already trigger an immediate refresh, so a
+  slower background poll loses nothing.
+
+### Fixed
+- Selecting a source now waits 3s before refreshing. An immediate refresh
+  read the previous input back and left the entity showing stale state
+  until the next poll.
+
 ## [0.1.5] - 2026-08-29
 
 ### Added

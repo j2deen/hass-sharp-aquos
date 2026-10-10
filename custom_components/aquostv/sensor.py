@@ -5,6 +5,12 @@ aspect ratio, AV/picture mode, backlight level, and tuner signal strength.
 Model is surfaced via the device info instead of a separate entity, and
 audio-selection/channel aren't exposed here yet - their value mappings
 haven't been confirmed against a real TV response.
+
+Not every model answers every query, so a sensor is only created once the
+coordinator has actually read that field off the TV. Fields the TV rejects
+never get an entity, instead of a permanently-unknown sensor cluttering the
+device page. Since support is only learned while the TV is on, entities may
+appear a poll or two after setup rather than immediately.
 """
 
 from __future__ import annotations
@@ -18,7 +24,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import CONF_NAME, EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import AquosConfigEntry
@@ -73,10 +79,30 @@ SENSOR_DESCRIPTIONS: tuple[AquosSensorEntityDescription, ...] = (
 async def async_setup_entry(
     hass: HomeAssistant, entry: AquosConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    """Set up AQUOS diagnostic sensors from a config entry."""
-    async_add_entities(
-        AquosSensor(entry, description) for description in SENSOR_DESCRIPTIONS
-    )
+    """Set up AQUOS diagnostic sensors from a config entry.
+
+    Sensors are added lazily as the coordinator confirms the TV supports
+    each field, so a model that rejects e.g. the backlight query simply
+    never gets a backlight sensor.
+    """
+    coordinator = entry.runtime_data
+    added: set[str] = set()
+
+    @callback
+    def _add_supported_sensors() -> None:
+        new_entities = [
+            AquosSensor(entry, description)
+            for description in SENSOR_DESCRIPTIONS
+            if description.key not in added
+            and description.key in coordinator.supported_fields
+        ]
+        if not new_entities:
+            return
+        added.update(entity.entity_description.key for entity in new_entities)
+        async_add_entities(new_entities)
+
+    _add_supported_sensors()
+    entry.async_on_unload(coordinator.async_add_listener(_add_supported_sensors))
 
 
 class AquosSensor(AquosEntity, SensorEntity):

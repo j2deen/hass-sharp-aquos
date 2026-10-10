@@ -38,7 +38,9 @@ In addition to the current state of the above controls:
 - Brightness
 - Signal strength
 
-All of these are created automatically when you set up the integration - nothing extra to configure. Note: Not all models support all commands and sensors.
+All of these are created automatically when you set up the integration - nothing extra to configure.
+
+Not all models support all commands and sensors. The integration probes each reading once the TV is on; a sensor only appears once the TV has actually answered that query, and a query the TV rejects is dropped from polling for the rest of the session rather than retried every cycle. Channel and signal strength are only read while the TV is on the tuner input. The TV is polled every 60 seconds; commands you send trigger an immediate refresh.
 
 ## Compatibility
 

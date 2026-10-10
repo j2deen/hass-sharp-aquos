@@ -6,6 +6,7 @@ pass so entities never issue their own redundant TCP round trips.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import logging
 from datetime import timedelta
@@ -36,6 +37,27 @@ class AquosData:
     model: str | None = None
 
 
+# Everything polled per cycle once the TV is confirmed on. Each entry is
+# (AquosData attribute, AquosTV method name, optional "is this reading
+# meaningful right now?" predicate). The predicate is checked against the
+# partially-filled snapshot, so it can gate on fields read earlier in the
+# list - which is why source_code comes before signal_strength.
+POLLED_FIELDS: tuple[tuple[str, str, Callable[[AquosData], bool] | None], ...] = (
+    ("volume", "volume", None),
+    ("is_muted", "mute", None),
+    ("source_code", "input_source", None),
+    ("aspect_ratio", "aspect_ratio", None),
+    ("audio_selection", "audio_selection", None),
+    ("av_mode", "av_mode", None),
+    ("backlight", "backlight", None),
+    # Tuner channel and signal strength only mean anything on the
+    # TV/antenna input; on HDMI the TV rejects the queries, which must not
+    # be mistaken for "this model doesn't support them".
+    ("channel", "channel", lambda d: d.source_code == 0),
+    ("signal_strength", "signal_strength", lambda d: d.source_code == 0),
+)
+
+
 class AquosDataUpdateCoordinator(DataUpdateCoordinator[AquosData]):
     """Polls the TV on an interval and hands entities a shared snapshot."""
 
@@ -50,6 +72,25 @@ class AquosDataUpdateCoordinator(DataUpdateCoordinator[AquosData]):
         self._power_on_enabled = power_on_enabled
         self._model: str | None = None
         self._warned_fields: set[str] = set()
+        # Fields the TV has answered at least once, and fields it has
+        # actively rejected. A field in neither set hasn't been probed yet
+        # (the TV may not have been on long enough).
+        self._supported_fields: set[str] = set()
+        self._unsupported_fields: set[str] = set()
+
+    @property
+    def supported_fields(self) -> frozenset[str]:
+        """Fields this TV has successfully returned a value for."""
+        return frozenset(self._supported_fields)
+
+    def is_field_supported(self, field: str) -> bool | None:
+        """True/False once the TV has answered or rejected the field, None
+        while it's still unknown."""
+        if field in self._supported_fields:
+            return True
+        if field in self._unsupported_fields:
+            return False
+        return None
 
     def _log_field_failure(self, field: str, err: Exception) -> None:
         """Log a field read failure, treating the two error types
@@ -110,20 +151,30 @@ class AquosDataUpdateCoordinator(DataUpdateCoordinator[AquosData]):
         # coroutine that was constructed but never reached is silently
         # dropped un-awaited, which is exactly what a "coroutine was never
         # awaited" RuntimeWarning means.
-        for attr, method_name in (
-            ("volume", "volume"),
-            ("is_muted", "mute"),
-            ("source_code", "input_source"),
-            ("aspect_ratio", "aspect_ratio"),
-            ("audio_selection", "audio_selection"),
-            ("av_mode", "av_mode"),
-            ("channel", "channel"),
-        ):
+        for attr, method_name, applicable in POLLED_FIELDS:
+            if attr in self._unsupported_fields:
+                # The TV already told us it doesn't do this one. Each read
+                # is a full round trip, so don't keep asking.
+                continue
+            if applicable is not None and not applicable(data):
+                continue
             try:
                 setattr(data, attr, await getattr(self.tv, method_name)())
-            except (AquosConnectionError, AquosCommandError) as err:
-                # Not every model supports every command - leave that field
-                # as None rather than failing the whole update.
+            except AquosConnectionError as err:
+                # Transient - says nothing about whether the field is
+                # supported. Leave it None this round and try again next.
                 self._log_field_failure(attr, err)
+            except AquosCommandError as err:
+                # The TV answered and rejected it: a stable fact about this
+                # model. Remember it and stop spending a round trip on it.
+                self._unsupported_fields.add(attr)
+                _LOGGER.warning(
+                    "TV rejected %s; treating it as unsupported on this model "
+                    "and not polling it again: %s",
+                    attr,
+                    err,
+                )
+            else:
+                self._supported_fields.add(attr)
 
         return data
