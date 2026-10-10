@@ -14,7 +14,7 @@ from datetime import timedelta
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .aquos import AquosCommandError, AquosConnectionError, AquosTV
+from .aquos import AquosCommandError, AquosConnectionError, AquosReplyError, AquosTV
 from .const import DOMAIN, UPDATE_INTERVAL_SECONDS
 
 _LOGGER = logging.getLogger(__name__)
@@ -58,6 +58,13 @@ POLLED_FIELDS: tuple[tuple[str, str, Callable[[AquosData], bool] | None], ...] =
 )
 
 
+# A field is only written off as unsupported after this many consecutive
+# ERR replies. One ERR can be state-dependent (the TV was mid-transition,
+# or on an input where the query is meaningless); three in a row across
+# separate polls is the model saying no.
+UNSUPPORTED_AFTER_REJECTIONS = 3
+
+
 class AquosDataUpdateCoordinator(DataUpdateCoordinator[AquosData]):
     """Polls the TV on an interval and hands entities a shared snapshot."""
 
@@ -77,6 +84,10 @@ class AquosDataUpdateCoordinator(DataUpdateCoordinator[AquosData]):
         # (the TV may not have been on long enough).
         self._supported_fields: set[str] = set()
         self._unsupported_fields: set[str] = set()
+        self._rejections: dict[str, int] = {}
+        # The TV's "accept power-on over TCP" flag only needs setting once
+        # per session, not on every poll - and it is rejected in standby.
+        self._power_on_setting_synced = False
 
     @property
     def supported_fields(self) -> frozenset[str]:
@@ -109,6 +120,11 @@ class AquosDataUpdateCoordinator(DataUpdateCoordinator[AquosData]):
         if isinstance(err, AquosConnectionError):
             _LOGGER.warning("Could not read %s: %s", field, err)
             return
+        if isinstance(err, AquosReplyError):
+            # One garbled exchange; the next poll retries it. Not worth a
+            # warning per occurrence on a flaky link.
+            _LOGGER.debug("Garbled reply for %s, will retry next poll: %s", field, err)
+            return
         if field not in self._warned_fields:
             self._warned_fields.add(field)
             _LOGGER.warning("Could not read %s (won't repeat this warning): %s", field, err)
@@ -123,17 +139,29 @@ class AquosDataUpdateCoordinator(DataUpdateCoordinator[AquosData]):
             # coordinator - a TV that's fully unplugged/asleep will simply
             # not answer, and that's a legitimate (common) state, not an
             # integration error.
-            return AquosData(is_on=False)
-
-        # Keep the TV's "accept power-on over TCP/IP" flag in sync with the
-        # config option on every poll, same as upstream did.
-        try:
-            await self.tv.set_power_on_command_settings(self._power_on_enabled)
-        except (AquosConnectionError, AquosCommandError) as err:
-            self._log_field_failure("power_on_command_settings", err)
+            return AquosData(is_on=False, model=self._model)
+        except AquosReplyError as err:
+            # The TV answered but not with a clean 0/1. That is one bad
+            # exchange, not a state change: keep whatever we last knew
+            # rather than flipping on/off for a poll.
+            _LOGGER.debug("Power query garbled, keeping last state: %s", err)
+            if self.data is not None:
+                return self.data
+            return AquosData(is_on=False, model=self._model)
 
         if not is_on:
             return AquosData(is_on=False, model=self._model)
+
+        # Sync the TV's "accept power-on over TCP/IP" flag with the config
+        # option once per session, while the TV is on (standby rejects it).
+        # Upstream re-sent it on every poll - a wasted round trip.
+        if not self._power_on_setting_synced:
+            try:
+                await self.tv.set_power_on_command_settings(self._power_on_enabled)
+            except (AquosConnectionError, AquosCommandError) as err:
+                self._log_field_failure("power_on_command_settings", err)
+            else:
+                self._power_on_setting_synced = True
 
         if self._model is None:
             try:
@@ -160,21 +188,30 @@ class AquosDataUpdateCoordinator(DataUpdateCoordinator[AquosData]):
                 continue
             try:
                 setattr(data, attr, await getattr(self.tv, method_name)())
-            except AquosConnectionError as err:
-                # Transient - says nothing about whether the field is
-                # supported. Leave it None this round and try again next.
+            except (AquosConnectionError, AquosReplyError) as err:
+                # Transient - a dropped connection or a garbled reply says
+                # nothing about whether the field is supported. Leave it
+                # None this round and try again next.
                 self._log_field_failure(attr, err)
             except AquosCommandError as err:
-                # The TV answered and rejected it: a stable fact about this
-                # model. Remember it and stop spending a round trip on it.
-                self._unsupported_fields.add(attr)
-                _LOGGER.warning(
-                    "TV rejected %s; treating it as unsupported on this model "
-                    "and not polling it again: %s",
-                    attr,
-                    err,
-                )
+                # The TV answered ERR. Once could be state-dependent; a run
+                # of them is the model saying it doesn't do this. Then stop
+                # spending a round trip on it.
+                count = self._rejections.get(attr, 0) + 1
+                self._rejections[attr] = count
+                if count >= UNSUPPORTED_AFTER_REJECTIONS:
+                    self._unsupported_fields.add(attr)
+                    _LOGGER.warning(
+                        "TV rejected %s %d times; treating it as unsupported "
+                        "on this model and not polling it again: %s",
+                        attr,
+                        count,
+                        err,
+                    )
+                else:
+                    _LOGGER.debug("TV rejected %s (%d/%d): %s", attr, count, UNSUPPORTED_AFTER_REJECTIONS, err)
             else:
                 self._supported_fields.add(attr)
+                self._rejections.pop(attr, None)
 
         return data

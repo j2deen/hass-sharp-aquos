@@ -25,6 +25,24 @@ follow the integration's `manifest.json` version.
   slower background poll loses nothing.
 
 ### Fixed
+- Replies are now read to the `\r` terminator instead of a fixed
+  `read(1024)`, and the login exchange is drained until the TV goes quiet
+  rather than consumed with two blind reads. Depending on how the TV
+  chunked its login acknowledgements, the old code could hand back an
+  empty string as the command's reply (`VOLM? returned non-numeric reply:
+  ''`), dropping a field for that poll dozens of times a night.
+- The power query accepts only a clean `0` or `1`. `_send` returns `True`
+  for an `OK` reply and `True == 1`, so a stray `OK` used to read as
+  "on" and an empty reply as "off" - the source of one-poll phantom
+  power flips. A garbled power reply now keeps the last known state.
+- Garbled replies (`AquosReplyError`) are distinct from the TV's `ERR`.
+  Only `ERR` counts toward marking a field unsupported, and only after
+  three consecutive rejections, so a single bad exchange or a
+  state-dependent refusal never permanently drops a field.
+- All exchanges with the TV go through one lock, so a poll and a service
+  call (or two service calls) no longer open overlapping connections.
+- The "accept power-on over TCP" setting is sent once per session while
+  the TV is on, instead of on every poll. Standby rejected it anyway.
 - Selecting a source now waits 3s before refreshing. An immediate refresh
   read the previous input back and left the entity showing stale state
   until the next poll.

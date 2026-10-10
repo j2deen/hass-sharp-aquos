@@ -33,7 +33,24 @@ class AquosConnectionError(AquosError):
 
 
 class AquosCommandError(AquosError):
-    """The TV rejected a command (ERR) or returned something unparseable."""
+    """The TV answered the command with ERR: it rejected it."""
+
+
+class AquosReplyError(AquosCommandError):
+    """The TV answered, but with something unparseable (empty, truncated,
+    a stray prompt). Subclasses AquosCommandError so existing handlers keep
+    working, but callers that care can tell "rejected" from "garbled": the
+    first is a fact about the model, the second is a fact about one
+    exchange and should be retried, not remembered."""
+
+
+# How long to wait for the TV to say anything after the login lines, and
+# how long it must stay quiet before we consider that exchange finished.
+# The TV may send nothing (no login configured), one prompt, two prompts,
+# or an ERR per blank line - and in any number of TCP chunks. Draining
+# until quiet handles all of those the same way; fixed-count reads do not.
+_LOGIN_FIRST_WAIT = 0.6
+_LOGIN_QUIET = 0.25
 
 
 class AquosTV:
@@ -53,6 +70,53 @@ class AquosTV:
         self._auth = f"{username}\r{password}\r".encode()
         self._timeout = timeout
         self._retries = retries
+        # One exchange at a time. The coordinator's poll and a service call
+        # (or two service calls) otherwise open overlapping connections to
+        # a TV that barely copes with one, and replies get attributed to
+        # the wrong request. Created lazily so the client can be built
+        # outside a running loop (config flow validation).
+        self._lock: asyncio.Lock | None = None
+
+    @staticmethod
+    async def _drain_until_quiet(reader: asyncio.StreamReader, first_wait: float, quiet: float) -> bytes:
+        """Read whatever arrives: wait up to first_wait for the first byte,
+        then keep reading until the line goes quiet for `quiet` seconds or
+        the TV closes the connection."""
+        buf = b""
+        wait = first_wait
+        while True:
+            try:
+                chunk = await asyncio.wait_for(reader.read(1024), timeout=wait)
+            except asyncio.TimeoutError:
+                return buf
+            if not chunk:
+                return buf
+            buf += chunk
+            wait = quiet
+
+    async def _read_reply(self, reader: asyncio.StreamReader) -> str:
+        """Read the reply to a command: the first non-empty \\r-terminated
+        line. Blank lines (a stray terminator from the login exchange) are
+        skipped rather than returned as an empty reply."""
+        deadline = asyncio.get_running_loop().time() + self._timeout
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            try:
+                raw = await asyncio.wait_for(reader.readuntil(b"\r"), timeout=remaining)
+            except asyncio.IncompleteReadError as err:
+                # TV closed the connection mid-reply; whatever arrived is it.
+                raw = err.partial
+                line = raw.decode(errors="ignore").strip()
+                if line:
+                    return line
+                raise AquosReplyError("TV closed the connection without replying") from err
+            except asyncio.LimitOverrunError as err:
+                raise AquosReplyError("TV reply had no terminator within buffer") from err
+            line = raw.decode(errors="ignore").strip()
+            if line:
+                return line
 
     async def _send_once(self, code: str, value: str | int) -> str:
         try:
@@ -65,14 +129,16 @@ class AquosTV:
         try:
             writer.write(self._auth)
             await writer.drain()
-            # The TV echoes/acknowledges the username and password separately.
-            await asyncio.wait_for(reader.read(1024), timeout=self._timeout)
-            await asyncio.wait_for(reader.read(1024), timeout=self._timeout)
+            # Swallow everything the TV says about the login lines - prompts,
+            # echoes, an ERR per blank line, or nothing at all - however it
+            # is chunked. The command's reply cannot arrive before we send
+            # the command, so nothing we drain here is something we wanted.
+            await self._drain_until_quiet(reader, _LOGIN_FIRST_WAIT, _LOGIN_QUIET)
 
             command = f"{code}{str(value).ljust(4)}\r"
             writer.write(command.encode())
             await writer.drain()
-            raw = await asyncio.wait_for(reader.read(1024), timeout=self._timeout)
+            reply = await self._read_reply(reader)
         except (OSError, asyncio.TimeoutError) as err:
             raise AquosConnectionError(f"Lost connection to {self._host}:{self._port}") from err
         finally:
@@ -82,22 +148,26 @@ class AquosTV:
             except OSError:
                 pass
 
-        return raw.decode(errors="ignore").strip()
+        return reply
 
     async def _send(self, code: str, value: str | int = "?") -> str | int | bool:
-        """Send a command, retrying transient connection failures."""
-        last_err: Exception | None = None
-        for attempt in range(self._retries + 1):
-            try:
-                status = await self._send_once(code, value)
-                break
-            except AquosConnectionError as err:
-                last_err = err
-                if attempt < self._retries:
-                    await asyncio.sleep(0.2)
-        else:
-            assert last_err is not None
-            raise last_err
+        """Send a command, retrying transient connection failures. Exchanges
+        are serialised through the client lock."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            last_err: Exception | None = None
+            for attempt in range(self._retries + 1):
+                try:
+                    status = await self._send_once(code, value)
+                    break
+                except AquosConnectionError as err:
+                    last_err = err
+                    if attempt < self._retries:
+                        await asyncio.sleep(0.2)
+            else:
+                assert last_err is not None
+                raise last_err
 
         if status == "OK":
             return True
@@ -124,17 +194,26 @@ class AquosTV:
         if isinstance(result, bool):
             # _send() returns True for a bare "OK" reply - never valid for
             # a numeric query.
-            raise AquosCommandError(f"{code}{value} returned OK instead of a number")
+            raise AquosReplyError(f"{code}{value} returned OK instead of a number")
         if isinstance(result, int):
             return result
-        raise AquosCommandError(f"{code}{value} returned non-numeric reply: {result!r}")
+        raise AquosReplyError(f"{code}{value} returned non-numeric reply: {result!r}")
 
     # --- Power / system -------------------------------------------------
 
     async def power(self, on: bool | None = None) -> bool:
-        """Get or set power state."""
+        """Get or set power state.
+
+        The query accepts only a clean 0 or 1. Anything else - "OK" (which
+        _send returns as True, and True == 1), an empty line, a stray
+        prompt - raises AquosReplyError so the caller keeps its last known
+        state instead of flipping the TV on or off for one poll.
+        """
         if on is None:
-            return await self._send("POWR") == 1
+            state = await self._send_int("POWR")
+            if state not in (0, 1):
+                raise AquosReplyError(f"POWR? returned {state!r}, expected 0 or 1")
+            return state == 1
         await self._send("POWR", 1 if on else 0)
         return on
 
