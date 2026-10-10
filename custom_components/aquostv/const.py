@@ -13,7 +13,7 @@ DEFAULT_POWER_ON_ENABLED = True
 # Poll cadence. The TV is reached over a fresh TCP connection per command, so a
 # full update can be several sequential round trips - keep this well above the
 # per-command timeout.
-UPDATE_INTERVAL_SECONDS = 15
+UPDATE_INTERVAL_SECONDS = 60 # Was 15 seconds
 
 SOURCE_TV_ANTENNA = "TV / Antenna"
 SOURCE_HDMI_1 = "HDMI 1"
