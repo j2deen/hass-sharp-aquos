@@ -117,9 +117,7 @@ class AquosDataUpdateCoordinator(DataUpdateCoordinator[AquosData]):
             ("aspect_ratio", "aspect_ratio"),
             ("audio_selection", "audio_selection"),
             ("av_mode", "av_mode"),
-            ("backlight", "backlight"),
             ("channel", "channel"),
-            ("signal_strength", "signal_strength"),
         ):
             try:
                 setattr(data, attr, await getattr(self.tv, method_name)())
