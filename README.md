@@ -42,6 +42,24 @@ All of these are created automatically when you set up the integration - nothing
 
 Not all models support all commands and sensors. The integration probes each reading once the TV is on; a sensor only appears once the TV has actually answered that query, and a query the TV rejects is dropped from polling for the rest of the session rather than retried every cycle. Channel and signal strength are only read while the TV is on the tuner input. The TV is polled every 60 seconds; commands you send trigger an immediate refresh.
 
+## Diagnosing your TV
+
+`tools/aquos_probe.py` is a standalone, read-only probe (standard library only)
+that opens a raw connection to the TV, logs in the same way the integration
+does, sends one status query per connection, and records every reply chunk
+with timings. Use it to see exactly what your model answers in a given state,
+or to check which commands it rejects before filing an issue:
+
+```sh
+python3 tools/aquos_probe.py 192.168.1.50 --label on --burst
+python3 tools/aquos_probe.py 192.168.1.50 --label standby --burst
+python3 tools/aquos_probe.py 192.168.1.50 --label on --burst --queries POWR OPGD IFGS CHTR ACHN
+```
+
+Pass `--user`/`--password` if the TV has them set. Results print to the
+terminal and append to `tools/aquos_probe.jsonl`, which is git-ignored because
+it contains your TV's address.
+
 ## Compatibility
 
 This integration should work with network-enabled Sharp Aquos LCD/LED televisions released between roughly 2011 and 2016. Models include:
