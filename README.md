@@ -56,7 +56,11 @@ python3 tools/aquos_probe.py 192.168.1.50 --label standby --burst
 python3 tools/aquos_probe.py 192.168.1.50 --label on --burst --queries POWR OPGD IFGS CHTR ACHN
 ```
 
-Pass `--user`/`--password` if the TV has them set. Results print to the
+Pass `--user`/`--password` if the TV has them set. On macOS, Homebrew's
+Python runs as an app bundle that needs its own Local Network permission
+(System Settings → Privacy & Security → Local Network); if every connection
+fails instantly with "No route to host", grant that or run the probe with
+`/usr/bin/python3` instead. Results print to the
 terminal and append to `tools/aquos_probe.jsonl`, which is git-ignored because
 it contains your TV's address.
 

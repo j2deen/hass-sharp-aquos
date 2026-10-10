@@ -67,7 +67,12 @@ class AquosTV:
     ) -> None:
         self._host = host
         self._port = port
-        self._auth = f"{username}\r{password}\r".encode()
+        # With no credentials there is nothing to log in with, and a real
+        # TV (probed 2026-10-10) sends no prompt and answers each blank
+        # line with its own ERR - two wasted replies per command that the
+        # old fixed-count reads could mistake for the command's reply.
+        # So send the login lines only when there is something in them.
+        self._auth = f"{username}\r{password}\r".encode() if (username or password) else b""
         self._timeout = timeout
         self._retries = retries
         # One exchange at a time. The coordinator's poll and a service call
@@ -127,13 +132,15 @@ class AquosTV:
             raise AquosConnectionError(f"Could not connect to {self._host}:{self._port}") from err
 
         try:
-            writer.write(self._auth)
-            await writer.drain()
-            # Swallow everything the TV says about the login lines - prompts,
-            # echoes, an ERR per blank line, or nothing at all - however it
-            # is chunked. The command's reply cannot arrive before we send
-            # the command, so nothing we drain here is something we wanted.
-            await self._drain_until_quiet(reader, _LOGIN_FIRST_WAIT, _LOGIN_QUIET)
+            if self._auth:
+                writer.write(self._auth)
+                await writer.drain()
+                # Swallow everything the TV says about the login lines -
+                # prompts, echoes, an ERR per line, or nothing at all -
+                # however it is chunked. The command's reply cannot arrive
+                # before we send the command, so nothing drained here is
+                # something we wanted.
+                await self._drain_until_quiet(reader, _LOGIN_FIRST_WAIT, _LOGIN_QUIET)
 
             command = f"{code}{str(value).ljust(4)}\r"
             writer.write(command.encode())

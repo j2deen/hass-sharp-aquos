@@ -31,6 +31,10 @@ follow the integration's `manifest.json` version.
   chunked its login acknowledgements, the old code could hand back an
   empty string as the command's reply (`VOLM? returned non-numeric reply:
   ''`), dropping a field for that poll dozens of times a night.
+- With blank credentials the login lines are no longer sent at all. A
+  probed TV with no login configured sends no prompt and answers each
+  blank line with its own `ERR`, so the old code produced two junk
+  replies per command for nothing.
 - The power query accepts only a clean `0` or `1`. `_send` returns `True`
   for an `OK` reply and `True == 1`, so a stray `OK` used to read as
   "on" and an empty reply as "off" - the source of one-poll phantom
