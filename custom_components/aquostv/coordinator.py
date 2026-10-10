@@ -64,6 +64,10 @@ POLLED_FIELDS: tuple[tuple[str, str, Callable[[AquosData], bool] | None], ...] =
 # separate polls is the model saying no.
 UNSUPPORTED_AFTER_REJECTIONS = 3
 
+# How long after sending POWR1 a POWR? = 0 is still "booting" rather than
+# "off". The probed TV took ~15s to flip; leave headroom.
+POWER_ON_GRACE_SECONDS = 25.0
+
 
 class AquosDataUpdateCoordinator(DataUpdateCoordinator[AquosData]):
     """Polls the TV on an interval and hands entities a shared snapshot."""
@@ -85,9 +89,18 @@ class AquosDataUpdateCoordinator(DataUpdateCoordinator[AquosData]):
         self._supported_fields: set[str] = set()
         self._unsupported_fields: set[str] = set()
         self._rejections: dict[str, int] = {}
+        # After we send POWR1 the TV answers status queries for ~15s while
+        # still reporting POWR? = 0 (probed 2026-10-10). Until this
+        # monotonic deadline, a 0 is "still booting", not "off".
+        self._power_on_grace_until = 0.0
         # The TV's "accept power-on over TCP" flag only needs setting once
         # per session, not on every poll - and it is rejected in standby.
         self._power_on_setting_synced = False
+
+    def note_power_on_sent(self, grace_seconds: float = POWER_ON_GRACE_SECONDS) -> None:
+        """Record that we just told the TV to turn on, so the next poll or
+        two don't read the boot-time POWR? = 0 as a real off."""
+        self._power_on_grace_until = self.hass.loop.time() + grace_seconds
 
     @property
     def supported_fields(self) -> frozenset[str]:
@@ -150,6 +163,10 @@ class AquosDataUpdateCoordinator(DataUpdateCoordinator[AquosData]):
             return AquosData(is_on=False, model=self._model)
 
         if not is_on:
+            if self.hass.loop.time() < self._power_on_grace_until and self.data and self.data.is_on:
+                # We just sent POWR1; the TV reports 0 while it boots.
+                _LOGGER.debug("POWR? = 0 inside power-on grace; keeping state on")
+                return self.data
             return AquosData(is_on=False, model=self._model)
 
         # Sync the TV's "accept power-on over TCP/IP" flag with the config

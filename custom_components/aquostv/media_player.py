@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import logging
 from typing import Any
 
@@ -20,6 +21,7 @@ from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PASSWORD, CONF_PORT, 
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import config_validation as cv, issue_registry as ir
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
@@ -181,8 +183,23 @@ class AquosMediaPlayer(AquosEntity, MediaPlayerEntity):
         return str(channel) if channel is not None else None
 
     async def async_turn_on(self) -> None:
+        """Turn on, and don't let the boot window flip us back to off.
+
+        The TV keeps answering POWR? = 0 for ~15s after accepting POWR1
+        (see docs/PROTOCOL.md), so an immediate refresh would read off.
+        Show on optimistically, tell the coordinator to treat a 0 as
+        "booting" for a grace period, and read the real state once the
+        TV has had time to come up.
+        """
         await self._tv.power(True)
-        await self.coordinator.async_request_refresh()
+        self.coordinator.note_power_on_sent()
+        if self.coordinator.data is not None:
+            self.coordinator.async_set_updated_data(replace(self.coordinator.data, is_on=True))
+
+        async def _refresh(_now) -> None:
+            await self.coordinator.async_request_refresh()
+
+        async_call_later(self.hass, 20, _refresh)
 
     async def async_turn_off(self) -> None:
         await self._tv.power(False)

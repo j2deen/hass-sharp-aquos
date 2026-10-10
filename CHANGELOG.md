@@ -47,6 +47,11 @@ follow the integration's `manifest.json` version.
   call (or two service calls) no longer open overlapping connections.
 - The "accept power-on over TCP" setting is sent once per session while
   the TV is on, instead of on every poll. Standby rejected it anyway.
+- `turn_on` no longer flashes the entity back to off. The probed TV
+  reports `POWR? = 0` for ~15s after accepting `POWR1`, so the immediate
+  refresh read "off". The entity now shows on optimistically, the
+  coordinator treats a 0 inside a 25s grace window as "still booting",
+  and a real refresh runs 20s later.
 - Selecting a source now waits 3s before refreshing. An immediate refresh
   read the previous input back and left the entity showing stale state
   until the next poll.
