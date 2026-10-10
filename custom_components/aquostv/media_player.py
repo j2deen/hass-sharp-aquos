@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -200,6 +201,7 @@ class AquosMediaPlayer(AquosEntity, MediaPlayerEntity):
         code = SOURCES_REVERSE.get(source)
         if code is not None:
             await self._tv.input_source(code)
+            await asyncio.sleep(3)
             await self.coordinator.async_request_refresh()
 
     async def async_play_media(self, media_type: str, media_id: str, **kwargs: Any) -> None:
